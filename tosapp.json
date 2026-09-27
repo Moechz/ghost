@@ -1,0 +1,109 @@
+{
+  "app_id": "ghostdocker",
+  "title": "Ghost",
+  "image": "ghost:6.65.0-alpine",
+  "repo_name": "ghost",
+  "github_repo": "ghost",
+  "mode": "wrapper",
+  "entrypoint_file": "src/entrypoint.sh",
+  "container_port": 2368,
+  "category": [
+    "Web_Services"
+  ],
+  "volumes": [
+    {
+      "host": "/Volume1/DockerAppData/ghostdocker/content",
+      "container": "/var/lib/ghost/content"
+    }
+  ],
+  "env": {
+    "TZ": "Asia/Shanghai",
+    "database__client": "sqlite3",
+    "database__connection__filename": "/var/lib/ghost/content/data/ghost.db"
+  },
+  "auth": "Ghost Foundation",
+  "upstream_url": "https://github.com/TryGhost/Ghost",
+  "upstream_license": "MIT",
+  "official": "https://github.com/TryGhost/Ghost",
+  "descript": "Ghost is a self-hosted publishing platform for blogs, newsletters and paid memberships. Write and publish posts in a modern editor, send newsletters to your subscribers and manage members from one dashboard. This app runs the official Ghost image from Docker Hub in a container on your NAS, keeps posts, images, themes and members in an SQLite database inside the application data folder (so they survive restarts and updates), and opens from its desktop icon.",
+  "important": "Requires DockerEngine (installed automatically if missing). The image is pulled from Docker Hub at install time; configure a registry mirror in DockerEngine if your NAS cannot reach it. All data lives in /Volume1/DockerAppData/ghostdocker/content. The first time you open the app it detects the address you used and configures itself - give it about 20 seconds. To pin a fixed address instead, edit content/public-url.txt. Back up the data folder before uninstalling with data removal.",
+  "release_note": "1. First release: Ghost 6.65.0 (official Docker Hub image, unmodified) as a non-root TOS 7 container with an embedded SQLite database, automatic detection of the address you reach the blog on, and 23-language store metadata.",
+  "healthcheck": [
+    "CMD-SHELL",
+    "wget -q -O /dev/null http://127.0.0.1:2368/ || exit 1"
+  ],
+  "healthcheck_interval": "30s",
+  "healthcheck_timeout": "10s",
+  "healthcheck_retries": 5,
+  "healthcheck_start_period": "60s",
+  "config_file": "content/public-url.txt",
+  "probe_host": "auto",
+  "runtime_files": [
+    {
+      "path": "content/public-url.txt",
+      "purpose": "the site address Ghost builds its links from (optional override)",
+      "created": "first start by the entrypoint wrapper",
+      "growth": "static",
+      "lifecycle": "never overwritten; edit it to pin the address"
+    },
+    {
+      "path": "content/data/ghost.db",
+      "purpose": "the entire site database (posts, pages, members, settings) in SQLite",
+      "created": "first start by Ghost",
+      "growth": "grows with posts, images and members",
+      "lifecycle": "never overwritten; this is the backup target"
+    },
+    {
+      "path": "content/images",
+      "purpose": "images you upload to posts and settings",
+      "created": "first start",
+      "growth": "grows with uploaded media",
+      "lifecycle": "managed by Ghost"
+    },
+    {
+      "path": "content/themes",
+      "purpose": "themes (the bundled Source theme plus anything you add)",
+      "created": "first start",
+      "growth": "user controlled",
+      "lifecycle": "managed by Ghost"
+    }
+  ],
+  "wrapper_note": "the upstream image runs as root and speaks to a MySQL server; this package runs it unprivileged (uid 1000) with an embedded SQLite database and, on the first start, learns the address you reach the blog on so that its links are correct (see src/entrypoint.sh).",
+  "wrapper_note_readme": "- **Entrypoint wrapper** (not a privilege shim): the image runs unprivileged already once the database is configured, so `src/entrypoint.sh` only seeds the SQLite configuration and resolves the site address, then hands over to the upstream `docker-entrypoint.sh`.",
+  "data_notes": "Everything the blog owns is inside the application data folder: `/Volume1/DockerAppData/ghostdocker/content` — the SQLite database in `data/ghost.db`, uploaded images in `images/`, themes in `themes/`. TOS Docker applications do not take part in the shared-folder mechanism, so that folder is reached with SSH/SFTP or the file station, not from the App Center. Copy `content/` to back the site up.",
+  "design_notes": [
+    "**SQLite, single container.** The upstream image defaults to a MySQL server on localhost; the wrapper sets `database__client=sqlite3` so the whole blog runs in one container with no database service to administer. The database file is `content/data/ghost.db`.",
+    "**Correct links from the first visit.** Ghost writes absolute URLs from its `url` setting and falls back to `http://localhost:2368`, which no other device can reach. The wrapper captures the `Host` header of the first request that does not come from the NAS itself and restarts the blog with that address (about 20 seconds, once). A commented sample of `content/public-url.txt` is seeded on the first start as a manual override.",
+    "**23-language store metadata** covering both documented TOS language sets.",
+    "**SQLite safety.** Ghost keeps a write-ahead log next to the database; keep the container stopped while copying `content/` for a consistent backup."
+  ],
+  "limitations": [
+    "Mail is not configured out of the box: Ghost falls back to a generated from-address, so member sign-up, newsletter and password-reset emails need SMTP settings before they reach real inboxes (Admin -> Settings -> Email).",
+    "The blog is served over plain HTTP on the LAN. Do not publish the port to the internet; put it behind a TLS reverse proxy or a tunnel if you need remote access.",
+    "Docker applications cannot be updated through the App Center: install the newer version over the same app (the data folder is kept), or back the data up and reinstall."
+  ],
+  "translations": {
+    "zh-cn": {
+      "descript": "Ghost 是自托管的专业发布平台，可用来搭建博客、邮件通讯与付费会员站点。在现代化编辑器中撰写与发布文章、向订阅者发送通讯、统一管理会员与订阅。本应用在 NAS 上以非 root 容器运行 Docker Hub 官方镜像，文章、图片、主题与会员数据都保存在应用数据目录内的 SQLite 数据库中，重启与更新都不会丢失；从桌面图标打开即可使用。",
+      "important": "需要 DockerEngine（缺失时应用中心会自动提示安装）。容器镜像在安装时从 Docker Hub 拉取；若 NAS 无法直连，请先在 DockerEngine 中配置镜像加速。所有数据位于 /Volume1/DockerAppData/ghostdocker/content。首次打开应用时它会自动识别你访问所用的地址并完成配置，大约需要 20 秒。如需固定地址，可编辑 content/public-url.txt。卸载并删除数据前请先备份应用数据目录。",
+      "release_note": "1. 首次发布：Docker Hub 官方镜像 Ghost 6.65.0（未做修改），以非 root 容器运行于 TOS 7，内置 SQLite 数据库，自动识别博客访问地址，商店文案覆盖 23 种语言。"
+    },
+    "zh-hk": {
+      "descript": "Ghost 是自架的專業發佈平台，可用來建立網誌、電子報與付費會員網站。在現代化編輯器中撰寫與發佈文章、向訂閱者發送電子報、統一管理會員與訂閱。本應用在 NAS 上以非 root 容器執行 Docker Hub 官方映像，文章、圖片、主題與會員資料都保存在應用資料目錄內的 SQLite 資料庫中，重新啟動與更新都不會遺失；從桌面圖示開啟即可使用。",
+      "important": "需要 DockerEngine（缺少時應用中心會自動提示安裝）。容器映像在安裝時從 Docker Hub 下載；若 NAS 無法直連，請先在 DockerEngine 中設定映像加速。所有資料位於 /Volume1/DockerAppData/ghostdocker/content。首次開啟應用時它會自動辨識你存取所用的位址並完成設定，約需 20 秒。如需固定位址，可編輯 content/public-url.txt。解除安裝並刪除資料前請先備份應用資料目錄。",
+      "release_note": "1. 首次發佈：Docker Hub 官方映像 Ghost 6.65.0（未做修改），以非 root 容器執行於 TOS 7，內建 SQLite 資料庫，自動辨識網誌存取位址，商店文案涵蓋 23 種語言。"
+    }
+  },
+  "platform": "x86_64",
+  "user": "1000:1000",
+  "publisher": "Moechz",
+  "compose_project": "ghostdocker",
+  "upstream_version": "6.65.0",
+  "release_tag_prefix": "v",
+  "version": "6.65.0-1",
+  "help": "https://github.com/Moechz/ghost/issues",
+  "license": "MIT",
+  "docker_socket": false,
+  "group_add": [],
+  "host_port": 8003
+}
