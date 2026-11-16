@@ -100,7 +100,7 @@
   "compose_project": "ghostdocker",
   "upstream_version": "6.65.0",
   "release_tag_prefix": "v",
-  "version": "6.65.0-1",
+  "version": "6.65.0-2",
   "help": "https://github.com/Moechz/ghost/issues",
   "license": "MIT",
   "docker_socket": false,
