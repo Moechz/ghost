@@ -112,6 +112,33 @@ for s in secs:
     chk(f'version      = "{ver}"' in body, f"[{s}] version != {ver}")
 chk(re.search(r"\bbeta\b", lang, re.I) is None, "lang must not contain the word 'beta' (V11)")
 
+# The store parser treats an ASCII semicolon as the start of an INI comment, so
+# "a; b" in a description truncates the text (and can leave a stray quote at the
+# end). Only the full-width "；" is safe. 2026-11-24 Home Assistant, -1 -> -2.
+for _s in secs:
+    for _key in ("descript", "important", "release_note"):
+        _mm = re.search(rf'{_key}\s*=\s*"(.+)"', _bodies[_s])
+        if _mm:
+            chk(";" not in _mm.group(1),
+                f"[{_s}] {_key} contains an ASCII ';' (the store treats it as an INI "
+                f"comment and truncates the text; use '；' or rewrite)")
+# Cross-app text: the zh-cn/zh-hk drafts have been copied from other packages
+# before, which the review records as "description is inconsistent with the
+# delivered functionality" (C9/F5).
+for _bad in ("beaverhabits", "habits tracker", "習慣打卡"):
+    chk(_bad not in lang.lower(), f"lang must not mention another application ({_bad})")
+    chk(_bad not in json.dumps(spec, ensure_ascii=False).lower(),
+        f"tosapp.json must not mention another application ({_bad})")
+
+# ---- spec metadata ----------------------------------------------------------
+_help = spec.get("help", "")
+chk(_help.endswith("PRIVACY.md"),
+    "tosapp.json help must point at a public PRIVACY.md (the link checker fetches it)")
+chk(spec.get("license") and spec.get("upstream_license"),
+    "tosapp.json must carry both license and upstream_license")
+chk(isinstance(spec.get("runtime_files"), list) and spec["runtime_files"],
+    "tosapp.json runtime_files must list the files the app writes (F11/S11)")
+
 # ---- svg icon ---------------------------------------------------------------
 svg_path = stage / f"{appid}.svg"
 svg_bytes = svg_path.read_bytes()
@@ -335,6 +362,29 @@ if mode == "wrapper":
         chk(embedded == source.replace("$", "$$"),
             "embedded entrypoint differs from src/entrypoint.sh")
         chk("set -u" in embedded, "entrypoint must keep 'set -u'")
+
+# ---- no literal credentials (T2) -------------------------------------------
+# The package must never carry a password, secret, token or API key: the owner
+# account is created by the user, every other secret is entered at runtime.
+_SECRET_RE = re.compile(
+    r"(?i)\b(password|passwd|secret|api[_-]?key|access[_-]?key|token|private[_-]?key)"
+    r"\b\s*[:=]\s*[\"']?[^\s\"']{3,}")
+_SECRET_SCAN = {
+    "docker-compose.yml": comp,
+    f"{appid}.lang": lang,
+    "config.ini": raw_cfg,
+    "src/entrypoint.sh": (root / "src" / "entrypoint.sh").read_text(encoding="utf-8")
+    if (root / "src" / "entrypoint.sh").exists() else "",
+}
+for _name, _text in _SECRET_SCAN.items():
+    _hit = _SECRET_RE.search(_text)
+    chk(_hit is None, f"{_name} contains a literal credential: {_hit.group(0)[:60] if _hit else ''}")
+
+# The immutable image digest must be recorded, so the same version cannot be
+# rebuilt against different bytes (T2 supply chain / V7).
+chk(re.search(r"sha256:[0-9a-f]{64}", comp) is not None,
+    "docker-compose.yml must record the image's immutable digest (sha256:...)")
+
 
 if errs:
     print("VERIFY FAIL:")

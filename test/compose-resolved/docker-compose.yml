@@ -1,0 +1,319 @@
+# ===========================================================================
+# Ghost for TerraMaster TOS 7 (Docker application)
+# ===========================================================================
+# Upstream image : ghost:6.79.0-alpine (Docker Hub official image, used unmodified)
+#                  -> https://github.com/TryGhost/Ghost
+# Image index    : ghost@sha256:3a052ac4c0a74566700ec30283f7f702b81e65ae179e46ce18cca159c8b98702
+#                  (OCI index, schema 2, built 2026-11-24; linux/amd64 manifest
+#                   sha256:fe638cd95b616444f59e5ff506584b512cdb4bb3022df43422a60ea2bcd648e7,
+#                   linux/arm64/v8 manifest
+#                   sha256:f1b9eccfd57d4a3659bba9a55b291fc50f74940d163aff6c12eb7722bc41c203,
+#                   each with a SLSA/in-toto attestation manifest)
+#                  The tag is what the installer pulls; the digest above is the
+#                  immutable reference this package was built and verified
+#                  against, so the same version cannot silently change bytes.
+# Base image     : node:22-alpine3.23 (Alpine 3.23.8, Node.js 22.23.5)
+# Ghost version  : 6.79.0 (label org.opencontainers.image.version=6.79.0-alpine3.23)
+#
+# Ports   : host 8003 -> container 2368. The host port is in the
+#           TOS-recommended 8000-19999 range and is not one of the reserved
+#           ports (22/80/443/445/3306/5050/5432/6379/8181/8443).
+# Volumes : all persistent data lives below
+#           /Volume1/DockerAppData/ghostdocker/. The /Volume* wildcard is
+#           deliberately NOT used: the platform does not expand it.
+# TOS rules honoured: Docker Hub image with a fixed tag (never ':latest'),
+#           container_name == application id, restart: unless-stopped,
+#           non-root user, no privileged mode, no network_mode: host, no
+#           cap_add, all capabilities dropped, no-new-privileges, explicit TZ,
+#           a healthcheck on the only service, and x-app-meta as the last block.
+# Wrapper : the upstream image is built to run as root and expects a MySQL
+#           server; this package runs it unprivileged (uid 1000) with an
+#           embedded SQLite database and, on the first start, learns the
+#           address you reach the blog on so that its links are correct
+#           (see src/entrypoint.sh).
+# Secrets : this file contains no credentials. The owner account, the Mailgun
+#           key, the Stripe keys and every API key are entered by the user in
+#           the admin UI at runtime and stored 0600 inside the data folder.
+# Escaping: docker compose interpolates ${VAR}/$VAR in compose files, so any
+#           '$' meant for the shell is written '$$'.
+#
+# NOTE for maintainers: never place a comment line directly in front of a
+# "- value" sequence item (ports, volumes, ...). The official
+# TOSAppSelfTestingTool parses the compose file line by line; a comment inside
+# a sequence makes it skip its permission sync, the mounted directories stay
+# root-owned and the non-root container cannot write into them.
+
+services:
+  ghostdocker:
+    image: ghost:6.79.0-alpine
+    container_name: ghostdocker
+    restart: unless-stopped
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 60s
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        #!/bin/sh
+        # ===========================================================================
+        # Ghost entrypoint wrapper for TerraMaster TOS 7
+        # ===========================================================================
+        # The upstream image is built to start Ghost as root and expects a MySQL
+        # server. TOS forbids root containers, so this wrapper:
+        #
+        #   1. makes Ghost use an embedded SQLite database inside the mounted data
+        #      volume (the compose file already exports database__client and
+        #      database__connection__filename) - one container, no database server;
+        #   2. tightens the permissions of everything that holds user data. The
+        #      database holds member e-mail addresses, subscription and Stripe
+        #      customer ids, the Mailgun key and API keys, so it is created 0600 and
+        #      its directory 0700 (umask 077 for every file Ghost writes);
+        #   3. resolves the address of the blog. Ghost builds every link (navigation,
+        #      canonical URLs, feeds, member e-mails) from its `url` setting and
+        #      otherwise falls back to http://localhost:2368, which no other device
+        #      can reach. On the first start this wrapper listens on the published
+        #      port, remembers the address of the first request that does not come
+        #      from inside the container, and then starts Ghost with it;
+        #   4. hands over to the upstream docker-entrypoint.sh, which seeds the
+        #      content directory on the first start and drops to the `node` user.
+        #
+        # The detected address is stored in content/.tos-site-url. A user-written
+        # content/public-url.txt always wins over it. Both files live in the mounted
+        # data volume, so they survive container updates and reinstalls.
+        #
+        # The package contains no credentials of any kind: the owner account is created
+        # by the user in the setup wizard, Mailgun/Stripe keys are entered in the admin
+        # UI and every secret is stored inside the data volume only.
+        #
+        # MAINTAINERS: this file is embedded into docker-compose.yml by
+        # scripts/build.sh, which indents it and escapes every dollar sign as two
+        # dollar signs (docker compose would otherwise interpolate them). Edit THIS
+        # file only, and never write a doubled dollar sign here.
+        # ===========================================================================
+        set -u
+        # Every file Ghost creates (database, WAL, logs, uploaded media) is readable by
+        # the application uid only - the database contains personal data of members.
+        umask 077
+
+        CONTENT=/var/lib/ghost/content
+        MANUAL="$$CONTENT/public-url.txt"
+        STATE="$$CONTENT/.tos-site-url"
+        CAPTURE=/tmp/tos-ghost-capture.js
+        FALLBACK="http://localhost:2368"
+
+        log() { printf '[ghost] %s\n' "$$*"; }
+
+        mkdir -p "$$CONTENT" "$$CONTENT/data" "$$CONTENT/logs" 2>/dev/null || true
+
+        # The mounted folder belongs to this uid (the installer syncs it); make sure the
+        # sub-directories that hold personal data are not group/world readable even if
+        # an older version of this package created them with a wider umask.
+        harden_permissions() {
+          chmod 0700 "$$CONTENT/data" "$$CONTENT/logs" 2>/dev/null || true
+          for f in "$$CONTENT/data/ghost.db" "$$CONTENT/data/ghost.db-wal" \
+                   "$$CONTENT/data/ghost.db-shm" "$$STATE"; do
+            if [ -e "$$f" ]; then chmod 0600 "$$f" 2>/dev/null || true; fi
+          done
+          for f in "$$CONTENT"/logs/*; do
+            if [ -f "$$f" ]; then chmod 0600 "$$f" 2>/dev/null || true; fi
+          done
+          return 0
+        }
+        harden_permissions
+
+        # Seed the optional override once; never touch an existing file.
+        if [ ! -e "$$MANUAL" ]; then
+          cat > "$$MANUAL" 2>/dev/null <<'SAMPLE'
+        # The address you use to reach this blog (optional).
+        #
+        # Ghost is normally configured automatically: the first time you open the app
+        # it remembers the address your browser used, and the blog keeps working from
+        # that address. Fill this file in only to pin a different one - for example a
+        # domain name behind a reverse proxy running on this NAS.
+        #
+        # Everything after '#' is ignored; the first http:// or https:// line wins.
+        # Restart the app to apply it. The file is never overwritten by the package.
+        #
+        #https://blog.example.com
+        SAMPLE
+          chmod 0644 "$$MANUAL" 2>/dev/null || true
+        fi
+
+        # First usable http(s) line of a file, whitespace stripped.
+        pick_url() {
+          [ -s "$$1" ] || return 0
+          sed -e 's/#.*$$//' -e 's/[[:space:]]//g' "$$1" 2>/dev/null \
+            | grep -m1 -E '^https?://[^/]+' \
+            | sed -e 's:/*$$::' || true
+        }
+
+        url="$$(pick_url "$$MANUAL")"
+        if [ -n "$$url" ]; then
+          log "site address from public-url.txt: $$url"
+        else
+          url="$$(pick_url "$$STATE")"
+          [ -n "$$url" ] && log "site address remembered from the first visit: $$url"
+        fi
+
+        # Nothing remembered yet: learn the address from the first real request.
+        if [ -z "$$url" ]; then
+          log "first start: waiting for the first request to learn the blog address"
+          cat > "$$CAPTURE" <<'TOSJS'
+        'use strict';
+        // First-run address capture for the Ghost TOS package. Listens on the
+        // published port before Ghost does. The first request whose Host header does
+        // not point at the container itself (a browser on the LAN, or a reverse
+        // proxy) is remembered as the blog address; loopback probes - the compose
+        // healthcheck - only get a short "starting" page. After the timeout the
+        // wrapper falls back to localhost, so the app can never stay stuck here.
+        const http = require('http');
+        const fs = require('fs');
+        const os = require('os');
+
+        const PORT = 2368;
+        const STATE = '/var/lib/ghost/content/.tos-site-url';
+        const TIMEOUT_MS = 300000;
+
+        const own = [];
+        const ifaces = os.networkInterfaces();
+        Object.keys(ifaces).forEach(function (name) {
+          (ifaces[name] || []).forEach(function (addr) {
+            own.push(String(addr.address).toLowerCase());
+          });
+        });
+
+        function bareHost(value) {
+          if (!value) return '';
+          const h = String(value).trim().toLowerCase();
+          if (h.charAt(0) === '[') {
+            const end = h.indexOf(']');
+            if (end > 0) return h.slice(1, end);
+          }
+          const colon = h.indexOf(':');
+          return colon >= 0 ? h.slice(0, colon) : h;
+        }
+
+        function isLocal(host) {
+          if (!host) return true;
+          if (host === 'localhost' || host === '::1' || host === '0.0.0.0') return true;
+          if (host.slice(-10) === '.localhost') return true;
+          if (host.slice(0, 4) === '127.') return true;
+          return own.indexOf(host) >= 0;
+        }
+
+        function scheme(req) {
+          const raw = String(req.headers['x-forwarded-proto'] || '')
+            .split(',')[0].trim().toLowerCase();
+          return raw === 'https' ? 'https' : 'http';
+        }
+
+        const PAGE = [
+          '<!doctype html><html lang="en"><head><meta charset="utf-8">',
+          '<meta name="viewport" content="width=device-width, initial-scale=1">',
+          '<title>Ghost is starting</title><style>',
+          'body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;',
+          'background:#15171A;color:#fff;display:flex;min-height:100vh;margin:0;',
+          'align-items:center;justify-content:center;text-align:center}',
+          'main{padding:2rem;max-width:34rem}h1{font-size:1.5rem;margin:0 0 .75rem}',
+          'p{margin:.35rem 0;color:#c5c8cc;line-height:1.5}</style></head><body>',
+          '<main><h1>Ghost is starting</h1>',
+          '<p>Preparing this blog for the address you just used.</p>',
+          '<p>This page reloads by itself; it usually takes about 20 seconds.</p>',
+          '</main><script>',
+          '(function(){function t(){fetch(window.location.href,',
+          '{cache:"no-store",redirect:"manual"}).then(function(r){',
+          'if(r.headers.get("X-TOS-Starting")==="1"){setTimeout(t,2000);}',
+          'else{window.location.reload();}}).catch(function(){setTimeout(t,2000);});}',
+          'setTimeout(t,2000);})();',
+          '</script></body></html>'
+        ].join('');
+
+        function respond(res, after) {
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store, must-revalidate',
+            'X-TOS-Starting': '1'
+          });
+          res.end(PAGE, after || function () {});
+        }
+
+        function done(server, code) {
+          setTimeout(function () {
+            try { server.close(); } catch (err) { /* already closed */ }
+            process.exit(code);
+          }, 200);
+        }
+
+        const server = http.createServer(function (req, res) {
+          const header = String(req.headers['x-forwarded-host'] || req.headers.host || '')
+            .split(',')[0].trim();
+          const host = bareHost(header);
+          if (isLocal(host)) {
+            respond(res);
+            return;
+          }
+          const url = scheme(req) + '://' + header;
+          try {
+            fs.writeFileSync(STATE, url.replace(/\/+$$/, '') + '\n', {mode: 0o600});
+            process.stdout.write('[ghost] captured site address: ' + url + '\n');
+          } catch (err) {
+            process.stdout.write('[ghost] could not store the site address: ' + err + '\n');
+          }
+          respond(res, function () { done(server, 0); });
+        });
+
+        server.on('error', function (err) {
+          process.stdout.write('[ghost] capture listener failed: ' + err + '\n');
+          process.exit(3);
+        });
+
+        server.listen(PORT, '0.0.0.0', function () {
+          setTimeout(function () { done(server, 3); }, TIMEOUT_MS);
+        });
+        TOSJS
+          node "$$CAPTURE" &
+          capture=$$!
+          trap 'kill "$$capture" 2>/dev/null; exit 0' TERM INT
+          wait "$$capture" || true
+          trap - TERM INT
+          rm -f "$$CAPTURE" 2>/dev/null || true
+          url="$$(pick_url "$$STATE")"
+        fi
+
+        if [ -n "$$url" ]; then
+          export url
+          log "starting Ghost with url=$$url"
+        else
+          export url="$$FALLBACK"
+          log "no external address seen yet; starting with $$url"
+          log "open the app once from your browser, or set content/public-url.txt and restart"
+        fi
+
+        # Re-apply after Ghost may have created the database in an earlier version.
+        harden_permissions
+
+        exec docker-entrypoint.sh node current/index.js
+    ports:
+      - "8003:2368"
+    environment:
+      TZ: "Asia/Shanghai"
+      database__client: "sqlite3"
+      database__connection__filename: "/var/lib/ghost/content/data/ghost.db"
+    volumes:
+      - /Volume1/DockerAppData/ghostdocker/content:/var/lib/ghost/content
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2368/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+# TOS App Center web metadata (must be the last block of the file):
+# web.port is the published host port above, protocol is http.
+x-app-meta:
+  web:
+    port: 8003
+    protocol: http

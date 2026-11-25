@@ -8,18 +8,26 @@
 #   1. makes Ghost use an embedded SQLite database inside the mounted data
 #      volume (the compose file already exports database__client and
 #      database__connection__filename) - one container, no database server;
-#   2. resolves the address of the blog. Ghost builds every link (navigation,
+#   2. tightens the permissions of everything that holds user data. The
+#      database holds member e-mail addresses, subscription and Stripe
+#      customer ids, the Mailgun key and API keys, so it is created 0600 and
+#      its directory 0700 (umask 077 for every file Ghost writes);
+#   3. resolves the address of the blog. Ghost builds every link (navigation,
 #      canonical URLs, feeds, member e-mails) from its `url` setting and
 #      otherwise falls back to http://localhost:2368, which no other device
 #      can reach. On the first start this wrapper listens on the published
 #      port, remembers the address of the first request that does not come
 #      from inside the container, and then starts Ghost with it;
-#   3. hands over to the upstream docker-entrypoint.sh, which seeds the
+#   4. hands over to the upstream docker-entrypoint.sh, which seeds the
 #      content directory on the first start and drops to the `node` user.
 #
 # The detected address is stored in content/.tos-site-url. A user-written
 # content/public-url.txt always wins over it. Both files live in the mounted
 # data volume, so they survive container updates and reinstalls.
+#
+# The package contains no credentials of any kind: the owner account is created
+# by the user in the setup wizard, Mailgun/Stripe keys are entered in the admin
+# UI and every secret is stored inside the data volume only.
 #
 # MAINTAINERS: this file is embedded into docker-compose.yml by
 # scripts/build.sh, which indents it and escapes every dollar sign as two
@@ -27,6 +35,9 @@
 # file only, and never write a doubled dollar sign here.
 # ===========================================================================
 set -u
+# Every file Ghost creates (database, WAL, logs, uploaded media) is readable by
+# the application uid only - the database contains personal data of members.
+umask 077
 
 CONTENT=/var/lib/ghost/content
 MANUAL="$CONTENT/public-url.txt"
@@ -36,7 +47,23 @@ FALLBACK="http://localhost:2368"
 
 log() { printf '[ghost] %s\n' "$*"; }
 
-mkdir -p "$CONTENT" 2>/dev/null || true
+mkdir -p "$CONTENT" "$CONTENT/data" "$CONTENT/logs" 2>/dev/null || true
+
+# The mounted folder belongs to this uid (the installer syncs it); make sure the
+# sub-directories that hold personal data are not group/world readable even if
+# an older version of this package created them with a wider umask.
+harden_permissions() {
+  chmod 0700 "$CONTENT/data" "$CONTENT/logs" 2>/dev/null || true
+  for f in "$CONTENT/data/ghost.db" "$CONTENT/data/ghost.db-wal" \
+           "$CONTENT/data/ghost.db-shm" "$STATE"; do
+    if [ -e "$f" ]; then chmod 0600 "$f" 2>/dev/null || true; fi
+  done
+  for f in "$CONTENT"/logs/*; do
+    if [ -f "$f" ]; then chmod 0600 "$f" 2>/dev/null || true; fi
+  done
+  return 0
+}
+harden_permissions
 
 # Seed the optional override once; never touch an existing file.
 if [ ! -e "$MANUAL" ]; then
@@ -51,8 +78,9 @@ if [ ! -e "$MANUAL" ]; then
 # Everything after '#' is ignored; the first http:// or https:// line wins.
 # Restart the app to apply it. The file is never overwritten by the package.
 #
-#http://192.168.1.10:8003
+#https://blog.example.com
 SAMPLE
+  chmod 0644 "$MANUAL" 2>/dev/null || true
 fi
 
 # First usable http(s) line of a file, whitespace stripped.
@@ -88,7 +116,7 @@ const os = require('os');
 
 const PORT = 2368;
 const STATE = '/var/lib/ghost/content/.tos-site-url';
-const TIMEOUT_MS = 600000;
+const TIMEOUT_MS = 300000;
 
 const own = [];
 const ifaces = os.networkInterfaces();
@@ -170,7 +198,7 @@ const server = http.createServer(function (req, res) {
   }
   const url = scheme(req) + '://' + header;
   try {
-    fs.writeFileSync(STATE, url.replace(/\/+$/, '') + '\n');
+    fs.writeFileSync(STATE, url.replace(/\/+$/, '') + '\n', {mode: 0o600});
     process.stdout.write('[ghost] captured site address: ' + url + '\n');
   } catch (err) {
     process.stdout.write('[ghost] could not store the site address: ' + err + '\n');
@@ -192,6 +220,7 @@ TOSJS
   trap 'kill "$capture" 2>/dev/null; exit 0' TERM INT
   wait "$capture" || true
   trap - TERM INT
+  rm -f "$CAPTURE" 2>/dev/null || true
   url="$(pick_url "$STATE")"
 fi
 
@@ -201,6 +230,10 @@ if [ -n "$url" ]; then
 else
   export url="$FALLBACK"
   log "no external address seen yet; starting with $url"
+  log "open the app once from your browser, or set content/public-url.txt and restart"
 fi
+
+# Re-apply after Ghost may have created the database in an earlier version.
+harden_permissions
 
 exec docker-entrypoint.sh node current/index.js
